@@ -106,22 +106,22 @@ def save_notepad_content(app: Application, full_path: str) -> None:
     def _save_via_keystrokes():
         # 1) Open Save dialog
         send_keys("^s")
-        time.sleep(0.1)
+        time.sleep(0.5)
         # 2) Type full path and confirm
         send_keys(full_path, with_spaces=True)
-        time.sleep(0.05)
+        time.sleep(0.5)
         send_keys("{ENTER}")
         # 3) If an overwrite confirmation appears, send Alt+Y (Yes)
-        time.sleep(0.1)
+        time.sleep(0.5)
         send_keys("%y")
         # 4) Brief wait to allow write to complete
-        time.sleep(0.15)
+        time.sleep(0.5)
 
     try:
         _save_via_keystrokes()
     except Exception as exc:
         logging.warning("Keystroke save failed (%s). Retrying once...", exc)
-        time.sleep(0.2)
+        time.sleep(0.5)
         try:
             _save_via_keystrokes()
         except Exception as exc2:
