@@ -5,7 +5,7 @@ import logging
 from typing import List, Dict
 
 import requests
-from pywinauto.application import Application
+from pywinauto.application import Application, ProcessNotFoundError, AppStartError
 from pywinauto.findwindows import ElementNotFoundError
 from pywinauto.timings import TimeoutError as PywinautoTimeoutError
 from pywinauto.keyboard import send_keys
@@ -41,56 +41,41 @@ def fetch_posts(limit: int = 10) -> List[Dict]:
         raise
 
 
-def build_blog_text(post: Dict) -> str:
-
-    post_id = post.get("id", "")
-    title = post.get("title", "Untitled")
-    body = post.get("body", "")
-
-    lines = [
-        f"Post {post_id}: {title}",
-        "by JSONPlaceholder",
-        "---",
-        body,
-        "",
-        f"Source: https://jsonplaceholder.typicode.com/posts/{post_id}",
-    ]
-    return "\n".join(lines)
-
-
 def launch_notepad_with_retry(max_attempts: int = 3, delay_seconds: float = .2) -> Application:
 
     last_exc: Exception | None = None
     for attempt in range(1, max_attempts + 1):
         try:
             app = Application(backend="uia").start("notepad.exe")
-            # Wait for main window
-            dlg = app.top_window()
-            dlg.wait("ready", timeout=10)
+
+            time.sleep(0.1)  # for the new notepad
+            app.connect(path="notepad.exe")
+            
             logging.info("Notepad launched (attempt %d)", attempt)
             return app
+        except AppStartError:
+            raise AppStartError
         except (ElementNotFoundError, PywinautoTimeoutError, RuntimeError) as exc:
             last_exc = exc
             logging.warning("Notepad launch failed on attempt %d: %s", attempt, exc)
             time.sleep(delay_seconds)
-    raise RuntimeError(f"Failed to launch Notepad after {max_attempts} attempts: {last_exc} the app is not installed or not in the path")
+    raise RuntimeError(f"Failed to launch Notepad after {max_attempts} attempts: {last_exc}")
 
 
 def type_text_into_notepad(app: Application, text: str) -> None:
 
     dlg = app.top_window()
-    dlg.wait("ready", timeout=10)
+    dlg.wait("ready", timeout=3)
     # Focus edit area and type text
     try:
-        edit = dlg.child_window(control_type="Edit").wrapper_object()
-        edit.set_edit_text("")
-        edit.type_keys(text, with_spaces=True, with_newlines=True, pause=0.01)
-    except (ElementNotFoundError, PywinautoTimeoutError) as exc:
-        # Fallback to sending keys directly to the window
-        logging.warning("Edit control not found, falling back to send_keys: %s", exc)
         dlg.set_focus()
-        send_keys(text, with_spaces=True, with_newlines=True, pause=0.01)
-
+        time.sleep(0.1)
+        send_keys('^a{DEL}')  # CTRL+A + Delete to clear existing text
+        time.sleep(0.1)
+        send_keys(text, with_spaces=True, with_newlines=True, pause=0.05) # slow cause the new notepad messes up with the speed
+        
+    except (ElementNotFoundError, PywinautoTimeoutError) as exc:
+        logging.warning("failed to type text into notepad: %s", exc)
 
 def save_notepad_content(app: Application, full_path: str) -> None:
 
@@ -105,7 +90,7 @@ def save_notepad_content(app: Application, full_path: str) -> None:
     # Keystroke-first approach with basic retry for robustness
     def _save_via_keystrokes():
         # 1) Open Save dialog
-        send_keys("^s")
+        send_keys("^+s")  # ^ = Ctrl, + = Shift // work for both new and old notepad
         time.sleep(0.5)
         # 2) Type full path and confirm
         send_keys(full_path, with_spaces=True)
@@ -119,15 +104,9 @@ def save_notepad_content(app: Application, full_path: str) -> None:
 
     try:
         _save_via_keystrokes()
-    except Exception as exc:
-        logging.warning("Keystroke save failed (%s). Retrying once...", exc)
-        time.sleep(0.5)
-        try:
-            _save_via_keystrokes()
-        except Exception as exc2:
-            logging.error("Keystroke save failed on retry: %s", exc2)
-            raise
-
+    except Exception as exc2:
+        logging.error("Keystroke save failed on retry: %s", exc2)
+        raise
 
 def close_notepad(app: Application) -> None:
     print("Closing Notepad...")
@@ -141,18 +120,32 @@ def close_notepad(app: Application) -> None:
 def process_post(output_dir: str, post: Dict) -> None:
 
     post_id = post.get("id", "unknown")
-    text = build_blog_text(post)
+    body = post.get("body", "")
     filename = f"post {post_id}.txt"
     full_path = os.path.join(output_dir, filename)
 
     app = launch_notepad_with_retry()
     try:
-        type_text_into_notepad(app, text)
+        type_text_into_notepad(app, body)
         save_notepad_content(app, full_path)
         logging.info("Saved: %s", full_path)
     finally:
         close_notepad(app)
 
+def close_all_open_notepads() -> None:
+    """Close all currently running Notepad windows."""
+    try:
+        apps = Application(backend="uia").connect(path="notepad.exe")
+        if hasattr(apps, 'windows'):
+            for dlg in apps.windows():
+                try:
+                    dlg.close()
+                    time.sleep(0.1)  
+                except Exception as exc:
+                    logging.warning("Failed to close a Notepad window: %s", exc)
+    except Exception:
+        logging.info("No Notepad running")
+        pass
 
 def main() -> int:
 
@@ -160,9 +153,13 @@ def main() -> int:
     try:
         output_dir = ensure_output_dir()
         posts = fetch_posts(limit=10)
+        close_all_open_notepads()
         for post in posts:
             try:
                 process_post(output_dir, post)
+            except AppStartError as exc:
+                logging.error("Notepad is not installed or not in the path")
+                return 1
             except Exception as exc:
                 logging.error("Failed to process post %s: %s", post.get("id"), exc)
                 # Continue with next post
